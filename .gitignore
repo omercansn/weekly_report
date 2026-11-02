@@ -1,0 +1,8 @@
+# Güvenlik: Hassas yapılandırma ve gerçek proje verileri Git'e eklenmez
+.streamlit/secrets.toml
+*.xlsx
+data/
+__pycache__/
+*.pyc
+.env
+
