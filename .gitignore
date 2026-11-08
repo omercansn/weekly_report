@@ -2,6 +2,9 @@
 .streamlit/secrets.toml
 *.xlsx
 data/
+.editor_sessions.json
+**/.editor_sessions.json
+*.tmp
 __pycache__/
 *.pyc
 .env

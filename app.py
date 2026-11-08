@@ -1,13 +1,15 @@
 """
 BiP / QA Haftalık Otomasyon Raporu — Streamlit Web Uygulaması
 
-Yetki Modeli (RBAC):
+Özellikler:
 - GÖRÜNTÜLEME MODU (Varsayılan — Linke giren herkes):
   Tüm haftalık raporları görüntüleyebilir, her bir sayfanın veya tüm raporun mail tablosunu
   tek tıkla kopyalayabilir (Copy-Paste) ve Excel (.xlsx) olarak indirebilir. Veri değiştiremez.
-- DÜZENLEME MODU (Yetkili Parolası ile):
+- DÜZENLEME MODU (Yetkili Parolası ile — 1 Saatlik Oturum Token'ı):
   Üst bardaki '🔓 Düzenleme Yetkisi Aç' butonundan parola girerek aktif edilir.
-  Tabloları düzenleyebilir, satır ekleyip silebilir, yeni hafta oluşturabilir ve Excel yükleyebilir.
+  Sayfa yenilense bile (F5) oturum korunur; 1 saatlik hareketsizlik (inactivity) sonunda otomatik kapanır.
+- GÜVENLİ KAYIT BUTONLARI:
+  Otomatik kayıt karmaşasını önlemek için her sekmede ve üst barda net '💾 Kaydet' butonları bulunur.
 """
 
 import copy
@@ -37,10 +39,12 @@ from mail_generator import (
 )
 from security import (
     attempt_editor_login,
+    get_session_remaining_minutes,
     init_security_state,
     is_editor_authenticated,
     revoke_editor_access,
     sanitize_text,
+    sync_browser_cookie,
     validate_xlsx_upload,
 )
 
@@ -134,8 +138,15 @@ def json_clone_with_optional_rollover(report: dict, add_weekly_to_cum: bool) -> 
     return cloned
 
 
+def commit_save(report: dict, current_user: str, section_name: str = "Rapor") -> None:
+    """Writes the current report state to disk and shows an immediate confirmation."""
+    save_report(st.session_state.active_report_id, report, updated_by=current_user)
+    st.toast(f"✅ {section_name} başarıyla kaydedildi!", icon="💾")
+
+
 def main() -> None:
     init_security_state()
+    sync_browser_cookie()
     is_editor = is_editor_authenticated()
 
     # Varsayılan Raporu Hazırla
@@ -148,7 +159,7 @@ def main() -> None:
     if st.session_state.active_report_id not in report_ids and report_ids:
         st.session_state.active_report_id = report_ids[0]
 
-    # İzleyici modunda her zaman diskteki en güncel veriyi oku (başka bir editör güncellemiş olabilir)
+    # Sadece ilk yüklemede, hafta değiştiğinde veya Salt Okunur moddayken diskten oku
     if (
         not is_editor
         or "report_data" not in st.session_state
@@ -169,12 +180,14 @@ def main() -> None:
     # =========================================================================
     # ÜST KONTROL BARI
     # =========================================================================
-    top_c1, top_c2, top_c3, top_c4 = st.columns([2.4, 2.2, 1.2, 1.5], vertical_alignment="center")
+    top_c1, top_c2, top_c3, top_c4 = st.columns([2.4, 2.0, 1.1, 1.8], vertical_alignment="center")
     with top_c1:
         st.markdown("### 📊 Haftalık Otomasyon Raporu")
         if is_editor:
+            rem_mins = get_session_remaining_minutes()
+            last_upd = report.get("meta", {}).get("updated_at", "-")
             st.markdown(
-                f'<span class="role-badge-editor">✏️ Düzenleme Modu Aktif ({sanitize_text(current_user, 30)}) • Otomatik Kayıt</span>',
+                f'<span class="role-badge-editor">✏️ Düzenleme Modu ({sanitize_text(current_user, 25)}) • Oturum: {rem_mins} dk • Son Kayıt: {last_upd}</span>',
                 unsafe_allow_html=True,
             )
         else:
@@ -215,7 +228,9 @@ def main() -> None:
         if not is_editor:
             with st.popover("🔓 Düzenleme Yetkisi Aç", use_container_width=True):
                 st.markdown("**🔒 Yetkili Editör Girişi**")
-                st.caption("Rapor verilerini düzenlemek veya yeni hafta eklemek için yetkili parolasını girin.")
+                st.caption(
+                    "Raporu düzenlemek için yetkili parolasını girin. Giriş yaptığınızda sayfa yenilense bile **1 saat boyunca** oturumunuz açık kalır."
+                )
                 with st.form("editor_login_form", clear_on_submit=False):
                     ed_name = st.text_input("Adınız / Rumuz", placeholder="Örn: QA Ekibi", max_chars=40)
                     ed_pwd = st.text_input("Düzenleme Parolası", type="password")
@@ -228,9 +243,12 @@ def main() -> None:
                         else:
                             st.error(msg)
         else:
-            btn_col1, btn_col2 = st.columns([1.2, 1])
+            btn_col0, btn_col1, btn_col2 = st.columns([1.15, 1.15, 0.85])
+            with btn_col0:
+                if st.button("💾 Tümünü Kaydet", type="primary", use_container_width=True):
+                    commit_save(report, current_user, "Tüm rapor")
             with btn_col1:
-                with st.popover("➕ Yeni Hafta / Yükle", use_container_width=True):
+                with st.popover("➕ Yeni / Yükle", use_container_width=True):
                     p_tab1, p_tab2 = st.tabs(["➕ Yeni Hafta", "📥 Excel Yükle"])
                     with p_tab1:
                         new_week_code = st.text_input("Yeni Hafta Kodu", placeholder="Örn: w44_2026")
@@ -298,7 +316,7 @@ def main() -> None:
     with tab1:
         col_left1, col_right1 = st.columns([1, 1.3], gap="large")
         with col_left1:
-            badge_txt = "Adım 1: Bilgileri Düzenleyin" if is_editor else "Özet Bilgiler (Düzenlemek için üstten yetki açın)"
+            badge_txt = "Adım 1: Bilgileri Düzenleyin ve Kaydedin" if is_editor else "Özet Bilgiler (Düzenlemek için üstten yetki açın)"
             st.markdown(f'<span class="step-badge">{badge_txt}</span>', unsafe_allow_html=True)
 
             c_pt, c_fb, c_fd = st.columns([1.6, 1, 1])
@@ -368,6 +386,9 @@ def main() -> None:
                         "Alt Bilgi Notu", value=s1.get("note", DEFAULT_SHEET1_NOTE), height=65
                     )
 
+                if st.button("💾 Sayfa 1 Değişikliklerini Kaydet", key="btn_save_s1", type="primary", use_container_width=True):
+                    commit_save(report, current_user, "Sayfa 1")
+
         with col_right1:
             st.markdown('<span class="step-badge">Tek Tıkla Mail İçin Kopyalayın</span>', unsafe_allow_html=True)
             render_copy_card(
@@ -383,7 +404,7 @@ def main() -> None:
     with tab2:
         if is_editor:
             st.markdown(
-                '<span class="step-badge">Adım 1: Hücrelere Çift Tıklayarak Sayıları Güncelleyin (Toplam ve Yüzdeler Otomatik Hesaplanır)</span>',
+                '<span class="step-badge">Adım 1: Hücrelere Çift Tıklayarak Sayıları Güncelleyin ve Kaydet Butonuna Basın</span>',
                 unsafe_allow_html=True,
             )
 
@@ -508,6 +529,10 @@ def main() -> None:
                 f"**VOIP Android:** `{m_now['voip_android_total']} ({m_now['voip_android_rate_str']})`"
             )
 
+        if is_editor:
+            if st.button("💾 Sayfa 2 Değişikliklerini Kaydet", key="btn_save_s2", type="primary", use_container_width=True):
+                commit_save(report, current_user, "Sayfa 2")
+
         st.markdown('<span class="step-badge">Tek Tıkla Mail İçin Kopyalayın</span>', unsafe_allow_html=True)
         render_copy_card(
             generate_sheet2_html(report),
@@ -522,7 +547,7 @@ def main() -> None:
     with tab3:
         if is_editor:
             st.markdown(
-                '<span class="step-badge">Adım 1: Tabloyu Düzenleyin (Satır eklemek için en alt satıra tıklayın)</span>',
+                '<span class="step-badge">Adım 1: Tabloyu Düzenleyin ve Kaydet Butonuna Basın (Satır eklemek için en alt satıra tıklayın)</span>',
                 unsafe_allow_html=True,
             )
 
@@ -585,6 +610,9 @@ def main() -> None:
                     "Etki Analizi Açıklaması", value=s3.get("legend", DEFAULT_SHEET3_LEGEND), height=95
                 )
 
+            if st.button("💾 Sayfa 3 Değişikliklerini Kaydet", key="btn_save_s3", type="primary", use_container_width=True):
+                commit_save(report, current_user, "Sayfa 3")
+
         st.markdown('<span class="step-badge">Tek Tıkla Mail İçin Kopyalayın</span>', unsafe_allow_html=True)
         render_copy_card(
             generate_sheet3_html(report),
@@ -599,7 +627,7 @@ def main() -> None:
     with tab4:
         if is_editor:
             st.markdown(
-                '<span class="step-badge">Adım 1: Defect / Bug / Story Listesini Düzenleyin (Sıralama: 1. Defect ➔ 2. Bug ➔ 3. Story)</span>',
+                '<span class="step-badge">Adım 1: Defect / Bug / Story Listesini Düzenleyin ve Kaydet Butonuna Basın</span>',
                 unsafe_allow_html=True,
             )
         st.caption(
@@ -721,6 +749,9 @@ def main() -> None:
                     )
                 s4["maintenance_items"] = cleaned_maint
 
+            if st.button("💾 Sayfa 4 Değişikliklerini Kaydet", key="btn_save_s4", type="primary", use_container_width=True):
+                commit_save(report, current_user, "Sayfa 4")
+
         st.markdown('<span class="step-badge">Tek Tıkla Mail İçin Kopyalayın</span>', unsafe_allow_html=True)
         render_copy_card(
             generate_sheet4_html(report),
@@ -822,6 +853,9 @@ def main() -> None:
                 mail_cfg["include_s4"] = bool(inc_s4)
                 mail_cfg["intro_text"] = sanitize_text(intro_msg, max_len=2000)
 
+                if st.button("💾 Mail Ayarlarını Kaydet", key="btn_save_mail_cfg", type="primary", use_container_width=True):
+                    commit_save(report, current_user, "Mail ayarları")
+
         combined_html = generate_combined_mail_html(
             report,
             include_s1=mail_cfg.get("include_s1", True),
@@ -837,12 +871,6 @@ def main() -> None:
             key="all_copy",
             height=720,
         )
-
-    # =========================================================================
-    # SADECE YETKİLİ EDİTÖR MODUNDA OTOMATİK KAYIT YAPILIR
-    # =========================================================================
-    if is_editor:
-        save_report(st.session_state.active_report_id, report, updated_by=current_user)
 
 
 if __name__ == "__main__":
